@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.RegularExpressions;
 using SkiaSharp;
 
 namespace BigBlueFish.Windows;
@@ -10,6 +11,29 @@ internal static class LinuxCapture
 {
     internal static async Task<CompanionWindowImage> CaptureAsync(IntPtr window, int maximum, bool fullScreen, CancellationToken token)
     {
+        if (OperatingSystem.IsMacOS())
+        {
+            var tempPath = Path.Combine(Path.GetTempPath(), $"bigbluefish-capture-{Guid.NewGuid():N}.png");
+            try
+            {
+                var macStart = new ProcessStartInfo("/usr/sbin/screencapture") { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true };
+                macStart.ArgumentList.Add("-x");
+                macStart.ArgumentList.Add(tempPath);
+                using var macProcess = LinuxProcesses.Start(macStart);
+                using var macCancel = token.Register(() => { try { macProcess.Kill(true); } catch { } });
+                var macErrors = macProcess.StandardError.ReadToEndAsync(token);
+                await macProcess.WaitForExitAsync(token);
+                if (macProcess.ExitCode != 0 || !File.Exists(tempPath)) throw new IOException((await macErrors).Trim());
+                using var macBitmap = SKBitmap.Decode(await File.ReadAllBytesAsync(tempPath, token)) ?? throw new IOException("桌面截图未返回有效图像。");
+                if ((long)macBitmap.Width * macBitmap.Height > 150_000_000) throw new IOException("截图尺寸过大。");
+                return CompanionNative.Encode(macBitmap, maximum);
+            }
+            finally
+            {
+                try { if (File.Exists(tempPath)) File.Delete(tempPath); } catch { }
+            }
+        }
+        if (!OperatingSystem.IsLinux()) throw new PlatformNotSupportedException();
         if (!CompanionNative.Wayland) return await Task.Run(() => { token.ThrowIfCancellationRequested(); return CompanionNative.Capture(window, maximum, fullScreen); }, token);
         var start = new ProcessStartInfo(Path.Combine(AppContext.BaseDirectory, "runtime/BigBlueFish.PortalCapture")) { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true };
         if (!fullScreen) start.ArgumentList.Add("--foreground");
@@ -30,14 +54,70 @@ internal sealed record CompanionWindowImage(string DataUrl, int Width, int Heigh
 internal static class CompanionNative
 {
     static readonly object gate = new();
-    static readonly IntPtr display = XOpenDisplay(IntPtr.Zero);
+    static readonly IntPtr display = OperatingSystem.IsLinux() ? XOpenDisplay(IntPtr.Zero) : IntPtr.Zero;
     static readonly XErrorHandler errorHandler = (_, _) => 0;
-    static CompanionNative() { if (display != IntPtr.Zero) XSetErrorHandler(errorHandler); }
+    internal static bool? TestPowerOverride;
+    static DateTime nextPowerCheck = DateTime.MinValue;
+    static bool cachedOnAC = true;
+    static DateTime nextMacSessionCheck = DateTime.MinValue;
+    static string cachedMacFrontApp = "macOS 桌面";
+    static bool cachedMacFullscreen;
+    static DateTime nextMacIdleCheck = DateTime.MinValue;
+    static double cachedMacIdleSeconds = 10;
+    static CompanionNative() { if (OperatingSystem.IsLinux() && display != IntPtr.Zero) XSetErrorHandler(errorHandler); }
+    static void RefreshMacSessionInfo()
+    {
+        if (!OperatingSystem.IsMacOS() || DateTime.UtcNow < nextMacSessionCheck) return;
+        nextMacSessionCheck = DateTime.UtcNow.AddMilliseconds(1500);
+        try
+        {
+            var start = new ProcessStartInfo("/usr/bin/lsappinfo") { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true };
+            start.ArgumentList.Add("metainfo");
+            using var process = Process.Start(start);
+            if (process == null) return;
+            string output = process.StandardOutput.ReadToEnd();
+            process.WaitForExit(1500);
+            var modeMatch = Regex.Match(output, @"presentationMode=""([^""]+)""");
+            cachedMacFullscreen = modeMatch.Success && !string.Equals(modeMatch.Groups[1].Value, "Normal", StringComparison.OrdinalIgnoreCase);
+            var orderMatch = Regex.Match(output, @"bringForwardOrder\s*=\s*(.+)");
+            if (orderMatch.Success)
+            {
+                foreach (Match app in Regex.Matches(orderMatch.Groups[1].Value, @"""([^""]+)"""))
+                {
+                    string name = app.Groups[1].Value.Trim();
+                    if (name.Length == 0 || name is "Avalonia Application" or "BigBlueFish.Linux" or "蓝色大肥鱼") continue;
+                    cachedMacFrontApp = name;
+                    break;
+                }
+            }
+        }
+        catch { }
+    }
     internal static bool OnAC
     {
         get
         {
+            if (TestPowerOverride.HasValue) return TestPowerOverride.Value;
             if (App.Args.Contains("--test-mode") && App.Args.Contains("--test-battery")) return false;
+            if (OperatingSystem.IsMacOS())
+            {
+                if (DateTime.UtcNow < nextPowerCheck) return cachedOnAC;
+                try
+                {
+                    var start = new ProcessStartInfo("/usr/bin/pmset") { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true };
+                    start.ArgumentList.Add("-g");
+                    start.ArgumentList.Add("batt");
+                    using var process = Process.Start(start);
+                    if (process == null) return true;
+                    string output = process.StandardOutput.ReadToEnd();
+                    process.WaitForExit(3000);
+                    cachedOnAC = !output.Contains("Battery Power", StringComparison.OrdinalIgnoreCase);
+                    nextPowerCheck = DateTime.UtcNow.AddSeconds(2);
+                    return cachedOnAC;
+                }
+                catch { return true; }
+            }
+            if (!OperatingSystem.IsLinux()) return true;
             try {
                 var supplies = Directory.GetDirectories("/sys/class/power_supply");
                 bool battery = supplies.Any(p => File.Exists(p + "/type") && File.ReadAllText(p + "/type").Trim() == "Battery");
@@ -45,13 +125,13 @@ internal static class CompanionNative
             } catch { return true; }
         }
     }
-    internal static bool Wayland => Environment.GetEnvironmentVariable("XDG_SESSION_TYPE") == "wayland";
-    internal static ulong Root => display == IntPtr.Zero ? 0 : XDefaultRootWindow(display);
-    static ulong Atom(string name) => XInternAtom(display, name, false);
+    internal static bool Wayland => OperatingSystem.IsLinux() && Environment.GetEnvironmentVariable("XDG_SESSION_TYPE") == "wayland";
+    internal static ulong Root => !OperatingSystem.IsLinux() || display == IntPtr.Zero ? 0 : XDefaultRootWindow(display);
+    static ulong Atom(string name) => !OperatingSystem.IsLinux() || display == IntPtr.Zero ? 0 : XInternAtom(display, name, false);
     static byte[] Property(ulong window, string name, out int format)
     {
         format = 0;
-        if (display == IntPtr.Zero) return [];
+        if (!OperatingSystem.IsLinux() || display == IntPtr.Zero) return [];
         if (XGetWindowProperty(display, window, Atom(name), 0, 4096, false, 0, out _, out format, out var count, out _, out var data) != 0 || data == IntPtr.Zero) return [];
         try { var bytes = new byte[checked((int)count * (format == 32 ? IntPtr.Size : Math.Max(1, format / 8)))]; Marshal.Copy(data, bytes, 0, bytes.Length); return bytes; }
         finally { XFree(data); }
@@ -63,15 +143,21 @@ internal static class CompanionNative
     }
     internal static IntPtr GetForegroundWindow()
     {
+        if (OperatingSystem.IsMacOS()) { RefreshMacSessionInfo(); return new IntPtr(1); }
+        if (!OperatingSystem.IsLinux()) return IntPtr.Zero;
         lock (gate) return display == IntPtr.Zero ? IntPtr.Zero : new IntPtr((long)(Integers(Root, "_NET_ACTIVE_WINDOW").FirstOrDefault()));
     }
     internal static bool IsDesktopWindow(IntPtr handle)
     {
+        if (OperatingSystem.IsMacOS()) { RefreshMacSessionInfo(); return false; }
+        if (!OperatingSystem.IsLinux()) return false;
         if (handle == IntPtr.Zero || (ulong)handle.ToInt64() == Root) return true;
         lock (gate) return display != IntPtr.Zero && Integers((ulong)handle.ToInt64(), "_NET_WM_WINDOW_TYPE").Contains(Atom("_NET_WM_WINDOW_TYPE_DESKTOP"));
     }
     internal static IntPtr ResolveForeground(IntPtr current, IntPtr previous)
     {
+        if (OperatingSystem.IsMacOS()) { RefreshMacSessionInfo(); return new IntPtr(1); }
+        if (!OperatingSystem.IsLinux()) return IntPtr.Zero;
         lock (gate)
         {
             bool Valid(IntPtr handle) {
@@ -88,6 +174,12 @@ internal static class CompanionNative
     }
     internal static string ForegroundIdentity(IntPtr handle)
     {
+        if (OperatingSystem.IsMacOS())
+        {
+            RefreshMacSessionInfo();
+            return $"前台辅助信息（以屏幕文字为主要依据）：\n前台应用：{cachedMacFrontApp}";
+        }
+        if (!OperatingSystem.IsLinux()) return "";
         lock (gate) {
             if (IsDesktopWindow(handle)) return "前台窗口：Linux 桌面\n画面是壁纸与快捷方式。";
             var title = Encoding.UTF8.GetString(Property((ulong)handle.ToInt64(), "_NET_WM_NAME", out _)).TrimEnd('\0');
@@ -98,6 +190,12 @@ internal static class CompanionNative
     }
     internal static bool IsFullscreen()
     {
+        if (OperatingSystem.IsMacOS())
+        {
+            RefreshMacSessionInfo();
+            return cachedMacFullscreen;
+        }
+        if (!OperatingSystem.IsLinux()) return false;
         lock (gate) {
             var window = GetForegroundWindow();
             return window != IntPtr.Zero && Integers((ulong)window.ToInt64(), "_NET_WM_STATE").Contains(Atom("_NET_WM_STATE_FULLSCREEN"));
@@ -106,13 +204,34 @@ internal static class CompanionNative
     internal static double IdleSeconds
     {
         get {
-            if (display == IntPtr.Zero) return 10;
+            if (OperatingSystem.IsMacOS())
+            {
+                if (DateTime.UtcNow < nextMacIdleCheck) return cachedMacIdleSeconds;
+                try
+                {
+                    var start = new ProcessStartInfo("/usr/sbin/ioreg") { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true };
+                    start.ArgumentList.Add("-c");
+                    start.ArgumentList.Add("IOHIDSystem");
+                    using var process = Process.Start(start);
+                    if (process == null) return cachedMacIdleSeconds;
+                    string output = process.StandardOutput.ReadToEnd();
+                    process.WaitForExit(3000);
+                    var match = Regex.Match(output, @"""HIDIdleTime""\s*=\s*(\d+)");
+                    if (match.Success && ulong.TryParse(match.Groups[1].Value, NumberStyles.None, CultureInfo.InvariantCulture, out ulong ns))
+                        cachedMacIdleSeconds = ns / 1_000_000_000d;
+                    nextMacIdleCheck = DateTime.UtcNow.AddSeconds(1);
+                    return cachedMacIdleSeconds;
+                }
+                catch { return cachedMacIdleSeconds; }
+            }
+            if (!OperatingSystem.IsLinux() || display == IntPtr.Zero) return 10;
             lock (gate) { var info = XScreenSaverAllocInfo(); if (info == IntPtr.Zero) return 0;
                 try { XScreenSaverQueryInfo(display, Root, info); return Marshal.PtrToStructure<SaverInfo>(info).idle / 1000d; } finally { XFree(info); } }
         }
     }
     internal static CompanionWindowImage Capture(IntPtr handle, int maximum, bool full)
     {
+        if (!OperatingSystem.IsLinux()) throw new PlatformNotSupportedException();
         lock (gate)
         {
             if (display == IntPtr.Zero) throw new IOException("当前桌面未提供 X11 读屏连接。");
@@ -176,7 +295,7 @@ internal static class CompanionNative
     }
     internal static void SetInputShape(IntPtr window, byte[] pixels, double scale, bool mirror)
     {
-        if (display == IntPtr.Zero || window == IntPtr.Zero) return;
+        if (!OperatingSystem.IsLinux() || display == IntPtr.Zero || window == IntPtr.Zero) return;
         var regions = new List<XRectangle>();
         for (int y = 0; y < 360; y++)
         {
@@ -230,7 +349,7 @@ internal static class CompanionOcr
         var image = await LinuxCapture.CaptureAsync(handle, 2560, false, token);
         double captureTime = clock.Elapsed.TotalMilliseconds;
         var bytes = Convert.FromBase64String(image.DataUrl[(image.DataUrl.IndexOf(',') + 1)..]);
-        var start = new ProcessStartInfo("/usr/bin/tesseract") { RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
+        var start = new ProcessStartInfo(LinuxProcesses.ResolveExecutable("tesseract", "/usr/bin/tesseract")) { RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
         foreach (var item in new[] { "stdin", "stdout", "-l", "chi_sim+eng", "tsv" }) start.ArgumentList.Add(item);
         using var process = LinuxProcesses.Start(start);
         using var cancel = token.Register(() => { try { process.Kill(true); } catch { } });
@@ -244,7 +363,7 @@ internal static class CompanionOcr
             var cells = line.TrimEnd('\r').Split('\t'); if (cells.Length < 12 || cells[0] != "5" || string.IsNullOrWhiteSpace(cells[11])) continue;
             if (double.TryParse(cells[6], out var x) && double.TryParse(cells[7], out var y) && double.TryParse(cells[8], out var width) && double.TryParse(cells[9], out var height)) words.Add(new(cells[11], x, y, width, height));
         }
-        bool desktop = !CompanionNative.Wayland && CompanionNative.IsDesktopWindow(handle);
+        bool desktop = OperatingSystem.IsLinux() && !CompanionNative.Wayland && CompanionNative.IsDesktopWindow(handle);
         string context = (CompanionNative.Wayland ? "当前桌面授权的前台窗口" : CompanionNative.ForegroundIdentity(handle)) + "\n" + (desktop ? "画面是壁纸与快捷方式图标，没有展开的应用正文。" : CompanionOcrLayout.Format(words, image.Width, image.Height));
         return new(context, "chi_sim+eng", image.Width, image.Height, words.Count, captureTime, clock.Elapsed.TotalMilliseconds - captureTime, words.ToArray(), handle.ToInt64(), desktop);
     }

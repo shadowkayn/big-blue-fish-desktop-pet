@@ -4,6 +4,9 @@
 .work/
 /work/
 .vs/
+.idea/
+.DS_Store
+/Library/
 *.user
 *.suo
 *.gguf

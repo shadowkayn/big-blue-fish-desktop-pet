@@ -11,10 +11,11 @@ namespace BigBlueFish.Windows;
 internal sealed partial class LinuxPetWindow
 {
     bool updateChecking;
+    string updateStatus = "";
     Window? modelDialog;
     CancellationTokenSource? modelWindowCancellation;
     void CloseModelInstaller() { modelWindowCancellation?.Cancel(); modelDialog?.Close(); }
-    static void OpenUrl(string url) { var start = new ProcessStartInfo("/usr/bin/xdg-open") { UseShellExecute = false }; start.ArgumentList.Add(url); Process.Start(start); }
+    static void OpenUrl(string url) { var start = new ProcessStartInfo(OperatingSystem.IsMacOS() ? "/usr/bin/open" : "/usr/bin/xdg-open") { UseShellExecute = false }; start.ArgumentList.Add(url); Process.Start(start); }
     async Task InstallModel()
     {
         if (closed || phase == "Exit") return;
@@ -105,17 +106,31 @@ internal sealed partial class LinuxPetWindow
         retry.Children.Add(ActionButton("重试", async () => await Download(selected))); retry.Children.Add(ActionButton("手动安装模型", async () => await Manual())); retry.Children.Add(ActionButton("无模型启动", Without));
         RefreshControls();
         try { dialog.Show(settings ?? this); await finished.Task; }
-        finally { modelWindowCancellation = null; modelDialog = null; modelInstalling = false; if (!closed && phase != "Exit") nextWarmup = DateTime.MinValue; }
+        finally { modelWindowCancellation = null; modelDialog = null; modelInstalling = false; if (!closed && phase != "Exit") { nextWarmup = DateTime.MinValue; if (brain.ModelAvailable) nextSpeech = DateTime.UtcNow.AddSeconds(20); } }
     }
     async Task CheckUpdates(bool manual)
     {
-        if (updateChecking) return; updateChecking = true;
+        if (updateChecking) return; updateChecking = true; updateStatus = "正在检查更新…";
         try {
             using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(25) };
             client.DefaultRequestHeaders.UserAgent.ParseAdd("BigBlueFish/" + typeof(LinuxPetWindow).Assembly.GetName().Version!.ToString(3));
             using var json = JsonDocument.Parse(await client.GetStringAsync("https://api.github.com/repos/Bai-Cute/big-blue-fish-desktop-pet/releases/latest"));
             var root = json.RootElement; string tag = root.GetProperty("tag_name").GetString() ?? "";
-            if (!Version.TryParse(tag.TrimStart('v'), out var latest) || latest <= typeof(LinuxPetWindow).Assembly.GetName().Version) { if (manual) await Confirm("检查更新", "当前已经是最新版本。", "知道了"); return; }
+            if (!Version.TryParse(tag.TrimStart('v'), out var latest) || latest <= typeof(LinuxPetWindow).Assembly.GetName().Version) {
+                updateStatus = "当前已是最新版本";
+                if (manual) await Confirm("检查更新", "当前已经是最新版本。", "知道了");
+                return;
+            }
+            updateStatus = "发现新版本 " + latest.ToString(3);
+            if (OperatingSystem.IsMacOS())
+            {
+                string releasePage = root.TryGetProperty("html_url", out var htmlProp) && htmlProp.GetString() is { Length: > 0 } pageUrl
+                    ? pageUrl
+                    : "https://github.com/Bai-Cute/big-blue-fish-desktop-pet/releases/latest";
+                if (await Confirm("发现新版本", "发现蓝色大肥鱼 " + latest.ToString(3) + "，是否前往发布页面查看并下载更新？", "前往下载"))
+                    OpenUrl(releasePage);
+                return;
+            }
 #if COMPANION_SAFE
             string asset = $"BigBlueFish-v{latest.ToString(3)}-Safe-Linux-x64.deb";
 #else
@@ -135,7 +150,10 @@ internal sealed partial class LinuxPetWindow
             await installer.WaitForExitAsync(); if (installer.ExitCode != 0) throw new IOException("更新安装未完成，可再次检查更新后重试。");
             var restart = new ProcessStartInfo(Path.Combine(AppContext.BaseDirectory, "BigBlueFish.Linux")) { UseShellExecute = false };
             restart.ArgumentList.Add("--wait-for-exit"); restart.ArgumentList.Add(Environment.ProcessId.ToString()); Process.Start(restart); CloseImmediately();
-        } catch (Exception error) { if (manual) await Confirm("检查更新", error.Message, "知道了"); }
+        } catch (Exception error) {
+            updateStatus = "暂时无法检查更新，可以稍后重试";
+            if (manual) await Confirm("检查更新", error.Message, "知道了");
+        }
         finally { updateChecking = false; }
     }
 }

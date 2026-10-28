@@ -29,7 +29,7 @@ internal sealed class LinuxVideoPlayer(Image image) : IDisposable
         image.Source = bitmap;
         image.RenderTransformOrigin = new(.5, .5, RelativeUnit.Relative);
         image.RenderTransform = new Avalonia.Media.ScaleTransform(mirror ? -1 : 1, 1);
-        var command = new ProcessStartInfo("/usr/bin/ffmpeg") { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true };
+        var command = new ProcessStartInfo(LinuxProcesses.ResolveExecutable("ffmpeg", "/usr/bin/ffmpeg")) { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true };
         foreach (var arg in new[] { "-v", "error", "-nostdin", "-threads", "1", "-c:v", "libvpx-vp9" }) command.ArgumentList.Add(arg);
         if (startSeconds > 0) { command.ArgumentList.Add("-ss"); command.ArgumentList.Add(startSeconds.ToString("R", System.Globalization.CultureInfo.InvariantCulture)); }
         command.ArgumentList.Add("-i"); command.ArgumentList.Add(path);

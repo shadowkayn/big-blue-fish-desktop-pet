@@ -11,11 +11,15 @@ internal sealed class LinuxLoadingRing : Avalonia.Controls.Control
     readonly Stopwatch clock = Stopwatch.StartNew();
     readonly DispatcherTimer timer = new() { Interval = TimeSpan.FromMilliseconds(16) };
     static readonly Color Blue = Color.FromRgb(80, 96, 152);
-    internal LinuxLoadingRing() { Width = Height = 26; timer.Tick += (_, _) => { if (IsVisible) InvalidateVisual(); }; AttachedToVisualTree += (_, _) => timer.Start(); DetachedFromVisualTree += (_, _) => timer.Stop(); }
+    internal LinuxLoadingRing() { Width = Height = 34; IsHitTestVisible = false; timer.Tick += (_, _) => { if (IsVisible) InvalidateVisual(); }; AttachedToVisualTree += (_, _) => timer.Start(); DetachedFromVisualTree += (_, _) => timer.Stop(); }
     public override void Render(DrawingContext context)
     {
-        base.Render(context); double size = Math.Min(Bounds.Width, Bounds.Height), radius = size * .39, stroke = size * .095;
-        var center = new Point(Bounds.Width / 2, Bounds.Height / 2); double angle = clock.Elapsed.TotalSeconds * 360 / 1.15, sweep = 70 + 205 * (.5 - .5 * Math.Cos(clock.Elapsed.TotalSeconds * Math.PI / .85));
+        base.Render(context);
+        double w = Bounds.Width, h = Bounds.Height, pad = 4;
+        var center = new Point(w / 2, h / 2);
+        context.DrawEllipse(new SolidColorBrush(Color.FromArgb(248, 255, 251, 244)), new Pen(new SolidColorBrush(Color.FromArgb(35, Blue.R, Blue.G, Blue.B)), 1), center, (w - 1) / 2, (h - 1) / 2);
+        double size = Math.Min(w - pad * 2, h - pad * 2), radius = size * .39, stroke = size * .095;
+        double angle = clock.Elapsed.TotalSeconds * 360 / 1.15, sweep = 70 + 205 * (.5 - .5 * Math.Cos(clock.Elapsed.TotalSeconds * Math.PI / .85));
         context.DrawEllipse(null, new Pen(new SolidColorBrush(Color.FromArgb(25, Blue.R, Blue.G, Blue.B)), stroke), center, radius, radius);
         Point At(double a) => new(center.X + radius * Math.Cos(a * Math.PI / 180), center.Y + radius * Math.Sin(a * Math.PI / 180));
         for (int i = 0; i < 64; i++) {
@@ -28,12 +32,35 @@ internal sealed class LinuxLoadingRing : Avalonia.Controls.Control
 }
 internal sealed class LinuxBubble : Decorator
 {
+    bool pointerOnTop;
+    double pointerX = double.NaN;
+    internal void PointAt(double x, bool onTop, double scale)
+    {
+        pointerOnTop = onTop;
+        pointerX = x;
+        Padding = new Thickness(16 * scale, (onTop ? 28 : 16) * scale, 16 * scale, (onTop ? 16 : 30) * scale);
+        InvalidateVisual();
+    }
     public override void Render(DrawingContext context)
     {
-        double w = Bounds.Width - 1.5, h = Bounds.Height - 1.5, s = Padding.Left / 16, r = 24 * s, tail = 12 * s, body = h - tail, x = w * .65;
-        if (w > r * 2 && body > r * 2) {
-            var path = Geometry.Parse(FormattableString.Invariant($"M {r},0.75 H {w-r} Q {w},0.75 {w},{r} V {body-r} Q {w},{body} {w-r},{body} H {x+tail} L {x},{h} L {x-tail},{body} H {r} Q 0.75,{body} 0.75,{body-r} V {r} Q 0.75,0.75 {r},0.75 Z"));
-            context.DrawGeometry(new SolidColorBrush(Color.FromRgb(255,251,244)), new Pen(new SolidColorBrush(Color.FromRgb(80,96,152)), 1.5 * s), path);
+        double w = Bounds.Width - 1.5, h = Bounds.Height - 1.5, s = Math.Max(.5, Padding.Left / 16), r = 24 * s, tail = 10 * s;
+        double minX = r + tail + 4 * s, maxX = Math.Max(minX, w - r - tail - 4 * s);
+        double x = Math.Clamp(double.IsNaN(pointerX) ? w * .65 : pointerX, minX, maxX);
+        if (!pointerOnTop)
+        {
+            double body = h - tail;
+            if (w > r * 2 && body > r * 2) {
+                var path = Geometry.Parse(FormattableString.Invariant($"M {r},0.75 H {w-r} Q {w},0.75 {w},{r} V {body-r} Q {w},{body} {w-r},{body} H {x+tail} L {x},{h} L {x-tail},{body} H {r} Q 0.75,{body} 0.75,{body-r} V {r} Q 0.75,0.75 {r},0.75 Z"));
+                context.DrawGeometry(new SolidColorBrush(Color.FromRgb(255,251,244)), new Pen(new SolidColorBrush(Color.FromRgb(80,96,152)), 1.5 * s), path);
+            }
+        }
+        else
+        {
+            double top = tail;
+            if (w > r * 2 && h - top > r * 2) {
+                var path = Geometry.Parse(FormattableString.Invariant($"M {r},{top} H {x-tail} L {x},0.75 L {x+tail},{top} H {w-r} Q {w},{top} {w},{top+r} V {h-r} Q {w},{h} {w-r},{h} H {r} Q 0.75,{h} 0.75,{h-r} V {top+r} Q 0.75,{top} {r},{top} Z"));
+                context.DrawGeometry(new SolidColorBrush(Color.FromRgb(255,251,244)), new Pen(new SolidColorBrush(Color.FromRgb(80,96,152)), 1.5 * s), path);
+            }
         }
         base.Render(context);
     }

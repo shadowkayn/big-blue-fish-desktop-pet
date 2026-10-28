@@ -12,13 +12,20 @@ internal static class Program
         if (args.Length == 2 && args[0] == "--wait-for-exit" && int.TryParse(args[1], out int pid)) {
             try { using var old = System.Diagnostics.Process.GetProcessById(pid); if (!old.WaitForExit(30000)) return; } catch (ArgumentException) { }
         }
+        var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        if (string.IsNullOrEmpty(home) && OperatingSystem.IsMacOS()) home = Path.Combine("/Users", Environment.UserName);
         var directory = Environment.GetEnvironmentVariable("BIGBLUEFISH_DATA") ?? Path.Combine(
-            Environment.GetEnvironmentVariable("XDG_DATA_HOME") ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".local/share"), "bigbluefish");
+            Environment.GetEnvironmentVariable("XDG_DATA_HOME") ?? Path.Combine(home, ".local/share"), "bigbluefish");
         Directory.CreateDirectory(directory); Environment.CurrentDirectory = directory;
         Build().StartWithClassicDesktopLifetime(args);
     }
-    public static AppBuilder Build() => AppBuilder.Configure<App>().UsePlatformDetect()
-        .With(new X11PlatformOptions { RenderingMode = [X11RenderingMode.Software] });
+    public static AppBuilder Build()
+    {
+        var builder = AppBuilder.Configure<App>().UsePlatformDetect();
+        if (OperatingSystem.IsLinux())
+            builder = builder.With(new X11PlatformOptions { RenderingMode = [X11RenderingMode.Software] });
+        return builder;
+    }
 }
 public sealed class App : Application
 {

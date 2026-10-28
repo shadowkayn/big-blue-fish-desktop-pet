@@ -97,17 +97,32 @@ internal sealed class CompanionBrain : IDisposable
     private static MatchCollection DeviceMemory(string devices) => Regex.Matches(devices, @"\((\d+)\s+MiB,\s*(\d+)\s+MiB free\)");
     internal static int GpuMicroBatch(string devices)
     {
-        var memory = DeviceMemory(devices).Cast<Match>().Select(m => long.Parse(m.Groups[2].Value)).ToArray();
+        var memory = DeviceMemory(devices).Cast<Match>().Select(m => long.Parse(m.Groups[2].Value)).Where(m => m > 0).ToArray();
         long available = memory.Length == 0 ? 0 : memory.Min();
         return available >= 8192 ? 2048 : available >= 4096 ? 512 : 128;
     }
     internal JsonElement? LastTimings { get; private set; }
     private string ReadyStatus(string text) => usingCpuFallback ? text + "（CPU兼容模式）" : text;
 
+    private static string ResolveRunnerPath(string runtimeDirectory)
+    {
+        string bundled = Path.Combine(runtimeDirectory, OperatingSystem.IsWindows() ? "llama-server.exe" : "llama-server");
+        if (!OperatingSystem.IsMacOS()) return bundled;
+        foreach (var candidate in new[]
+        {
+            bundled,
+            "/opt/homebrew/bin/llama-server",
+            "/usr/local/bin/llama-server",
+            Path.GetFullPath("runtime/llama-server"),
+            Path.GetFullPath("runtime/llama-server.exe")
+        })
+            if (File.Exists(candidate)) return candidate;
+        return bundled;
+    }
+
     private async Task<string> ReadGpuDevices(CancellationToken token)
     {
-        string path = OperatingSystem.IsWindows() ? Path.Combine(runtimeDirectory, "llama-server.exe")
-            : Path.Combine(runtimeDirectory, "llama-server");
+        string path = ResolveRunnerPath(runtimeDirectory);
         var start = new ProcessStartInfo(path) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
         start.ArgumentList.Add("--list-devices");
         Process? probe = null;
@@ -225,8 +240,7 @@ internal sealed class CompanionBrain : IDisposable
 
     private async Task StartRunner(CancellationToken token, bool gpu, int microBatch)
     {
-        var path = OperatingSystem.IsWindows() ? Path.Combine(runtimeDirectory, "llama-server.exe")
-            : Path.Combine(runtimeDirectory, "llama-server");
+        var path = ResolveRunnerPath(runtimeDirectory);
         var model = BigBlueFish.Deployment.ModelStore.Resolve(Environment.CurrentDirectory);
         if (!File.Exists(path)) throw new IOException("未找到本地推理程序：" + path);
         if (model == null) throw new IOException("尚未安装可用模型，可以在设置中安装模型。");

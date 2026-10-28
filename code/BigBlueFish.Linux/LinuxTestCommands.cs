@@ -23,8 +23,16 @@ internal sealed partial class LinuxPetWindow
                 case "close-settings": settings?.Close(); break;
                 case "speech-test": await Speak(false); break;
                 case "weather": await Speak(true); break;
+                case "bubble": ShowText("主人，小女仆今天也元气满满地来报到啦～", false, fromModel: true); break;
+                case "bubble-next": ShowText("主人，下一句已经送到啦，小尾巴也跟着摇起来～", false, fromModel: true); break;
+                case "battery": CompanionNative.TestPowerOverride = false; break;
+                case "ac": CompanionNative.TestPowerOverride = true; nextWarmup = DateTime.MinValue; break;
+                case "real-power": CompanionNative.TestPowerOverride = null; break;
+                case "model-off": Preferences.ModelEnabled = false; brain.Stop(); break;
+                case "model-on": Preferences.ModelEnabled = true; nextWarmup = DateTime.MinValue; break;
+                case "generate": nextSpeech = DateTime.UtcNow; break;
                 case "hide": hidden = true; Hide(); bubbleWindow.Hide(); break;
-                case "show": RestorePet(); break;
+                case "show": case "restore": RestorePet(); break;
                 case "close": Close(); break;
                 case "exit": CloseImmediately(); break;
                 case "ocr":
@@ -35,7 +43,21 @@ internal sealed partial class LinuxPetWindow
 #if !COMPANION_SAFE
                 case "render-input": if (mcpInput != null) RenderControl(mcpInput, "input.png"); break;
 #endif
-                default: if (command.StartsWith("bubble ")) ShowText(command[7..], true); break;
+                default:
+                    if (command.StartsWith("bubble ")) ShowText(command[7..], true);
+                    else if (command.StartsWith("event:")) Event(policy.Find(command[6..]));
+                    else if (command.StartsWith("action:"))
+                    {
+                        string name = command[7..];
+                        if (name == "drag") { moveRule = null; Play(policy.Find("被鼠标拖拽悬空反馈"), "Drag"); }
+                        else
+                        {
+                            string id = name switch { "idle" => "待机呼吸休闲", "wave" => "点击回应-元气挥手", "angry" => "点击回应-傲娇生气", "sleep" => "原地小憩沉眠", _ => name };
+                            var rule = policy.Rules.FirstOrDefault(r => r.Id == id);
+                            if (rule != null) PlayManualAction(rule);
+                        }
+                    }
+                    break;
             }
         } catch (Exception error) { File.WriteAllText("test-error.txt", error.ToString()); }
     }

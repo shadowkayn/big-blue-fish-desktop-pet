@@ -28,7 +28,7 @@ internal sealed partial class LinuxPetWindow : Window
     readonly Mutex mutex;
     string currentAction = "", phase = "Startup", fullText = "";
     string? nextExternalText;
-    DateTime nextSpeech = DateTime.UtcNow.AddSeconds(45), nextEvent = DateTime.MaxValue, nextWarmup;
+    DateTime nextSpeech = DateTime.UtcNow.AddSeconds(45), nextEvent = DateTime.UtcNow.AddSeconds(12), nextWarmup;
     DateTime bubbleUntil = DateTime.MaxValue;
     IntPtr lastForeground;
     bool closed, exitReady, hidden, fullscreenHidden, dragging, dragged, generating, streamed, externalSpeech, typing, modelReply, greetingNoticeActive;
@@ -57,11 +57,13 @@ internal sealed partial class LinuxPetWindow : Window
         loading.HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Left; loading.VerticalAlignment = Avalonia.Layout.VerticalAlignment.Top;
         player = new(sprite); player.FramePresented += MoveWithAnimation;
         PositionChanged += (_, _) => MoveBubble();
-        player.PixelsPresented += (pixels, mirror) => CompanionNative.SetInputShape(TryGetPlatformHandle()?.Handle ?? IntPtr.Zero, pixels, Width * DesktopScaling / 640, mirror);
-        player.Failed += error => { File.AppendAllText("companion-errors.log", DateTime.Now.ToString("s") + " " + error + "\n"); if (phase == "Exit") CloseImmediately(); };
+        player.PixelsPresented += (pixels, mirror) => { if (OperatingSystem.IsLinux()) CompanionNative.SetInputShape(TryGetPlatformHandle()?.Handle ?? IntPtr.Zero, pixels, Width * DesktopScaling / 640, mirror); };
+        player.Failed += error => { File.AppendAllText("companion-errors.log", DateTime.Now.ToString("s") + " " + error + "\n"); if (phase == "Exit") CloseImmediately(); else ShowText("动画未能播放，请检查动画组件是否完整。", false, true); };
         bubbleText.FontFamily = new FontFamily("avares://BigBlueFish.Linux/Assets#LemiXiaoNaiPaoTi");
         bubbleText.Foreground = Hair;
-        var close = new Button { Content = "×", Padding = new Thickness(3), HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Right, VerticalAlignment = Avalonia.Layout.VerticalAlignment.Top, Background = Brushes.Transparent, BorderThickness = new Thickness(0) };
+        var close = new Button { Content = "×", Padding = new Thickness(3), Foreground = Hair, HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Right, VerticalAlignment = Avalonia.Layout.VerticalAlignment.Top, Background = Brushes.Transparent, BorderThickness = new Thickness(0) };
+        Avalonia.Controls.ToolTip.SetTip(close, "关闭气泡");
+        Avalonia.Automation.AutomationProperties.SetName(close, "关闭气泡");
         close.Click += (_, _) => { typing = false; bubbleWindow!.Hide(); };
         var bubbleGrid = new Grid(); bubbleGrid.Children.Add(bubbleText); bubbleGrid.Children.Add(close); bubbleText.Margin = new Thickness(0, 0, 24, 0);
         bubbleFrame = new LinuxBubble { Child = bubbleGrid, Padding = new Thickness(16,16,16,30) };
@@ -128,10 +130,69 @@ internal sealed partial class LinuxPetWindow : Window
     PixelPoint Clamp(PixelPoint? requested = null)
     {
         var area = (Screens.ScreenFromWindow(this) ?? Screens.Primary)?.WorkingArea ?? new PixelRect(0, 0, 1280, 720);
-        double s = DesktopScaling, left = SpriteSize * 208 / 360 * s, top = SpriteSize * 58 / 360 * s, right = SpriteSize * 428 / 360 * s, bottom = SpriteSize * 336 / 360 * s;
+        double s = DesktopScaling, left = SpriteSize * 208 / 360 * s, top = SpriteSize * 58 / 360 * s, right = SpriteSize * 428 / 360 * s, bottom = SpriteSize * 336 / 360 * s, snap = 14 * s;
         var target = requested ?? Position;
-        var result = new PixelPoint((int)Math.Clamp(target.X, area.X - left, Math.Max(area.X - left, area.Right - right)), (int)Math.Clamp(target.Y, area.Y - top, Math.Max(area.Y - top, area.Bottom - bottom)));
+        double x = Math.Clamp(target.X, area.X - left, Math.Max(area.X - left, area.Right - right));
+        double y = Math.Clamp(target.Y, area.Y - top, Math.Max(area.Y - top, area.Bottom - bottom));
+        if (Math.Abs(x + left - area.X) < snap) x = area.X - left;
+        if (Math.Abs(x + right - area.Right) < snap) x = area.Right - right;
+        if (Math.Abs(y + top - area.Y) < snap) y = area.Y - top;
+        if (Math.Abs(y + bottom - area.Bottom) < snap) y = area.Bottom - bottom;
+        var result = new PixelPoint((int)x, (int)y);
         Position = result; MoveBubble(); return result;
+    }
+    void SnapToBottomRight()
+    {
+        var area = (Screens.ScreenFromWindow(this) ?? Screens.Primary)?.WorkingArea ?? new PixelRect(0, 0, 1280, 720);
+        moveRule = null;
+        Clamp(new PixelPoint((int)(area.Right - Width * DesktopScaling), (int)(area.Bottom - Height * DesktopScaling)));
+        Save();
+    }
+    void PlayManualAction(CompanionAnimationRule rule)
+    {
+        if (closed || phase == "Exit") return;
+        if (hidden) RestorePet();
+        moveRule = null;
+        if (rule.MoveKind != null) Event(rule);
+        else Play(rule, "External");
+    }
+    void PlayRandomAction()
+    {
+        if (closed || phase == "Exit") return;
+        var rules = policy.Rules;
+        PlayManualAction(rules[random.Next(rules.Count)]);
+    }
+    (string Category, CompanionAnimationRule[] Rules)[] ActionCategories()
+    {
+        var all = policy.Rules;
+        bool IsClickOrGreeting(CompanionAnimationRule r) => r.Pool is "Click" or "Greeting" or "Drag";
+        bool IsIdleOrRest(CompanionAnimationRule r) => r.Pool is "Idle" or "Daily" || r.Id is "哈欠连天" or "打瞌睡被惊醒" or "超大伸懒腰";
+        bool IsFood(CompanionAnimationRule r) => r.Meal != null || r.Id.StartsWith("吃") || r.Id is "涮火锅" or "大口吃零食" or "偷吃零食被抓住" or "是啊，吃什么";
+        bool IsWork(CompanionAnimationRule r) => r.WorkKind != null || r.Id.StartsWith("工作状态-") || r.Id.StartsWith("碎碎念-") || r.Id is "写代码" or "深度思考碎碎念" or "轻快记录";
+        bool IsMoney(CompanionAnimationRule r) => r.Id.StartsWith("余额-");
+        bool IsFestivalOrSeason(CompanionAnimationRule r) => !IsFood(r) && (r.Festival != null || r.SeasonOnly != null || r.SummerWeight.HasValue || r.WinterWeight.HasValue || r.Id is "插茱萸赏菊" or "拆礼物" or "放孔明灯" or "放河灯");
+        bool IsDanceOrArt(CompanionAnimationRule r) => r.Id is "优雅女仆舞" or "可爱宅舞" or "轻快摇摆舞" or "小幅度原地360度旋转展示" or "小提琴演奏" or "吹笛子" or "三球抛接" or "扑克魔术" or "整体换装试色";
+        var groups = new (string Name, Func<CompanionAnimationRule, bool> Match)[]
+        {
+            ("点击与问候", IsClickOrGreeting),
+            ("待机与作息", IsIdleOrRest),
+            ("三餐与美食", IsFood),
+            ("工作与思考", IsWork),
+            ("舞蹈与才艺", IsDanceOrArt),
+            ("节日与四季", IsFestivalOrSeason),
+            ("小金库状态", IsMoney)
+        };
+        var assigned = new HashSet<string>();
+        var result = new List<(string, CompanionAnimationRule[])>();
+        foreach (var g in groups)
+        {
+            var matched = all.Where(r => !assigned.Contains(r.Id) && g.Match(r)).ToArray();
+            foreach (var r in matched) assigned.Add(r.Id);
+            if (matched.Length > 0) result.Add((g.Name, matched));
+        }
+        var rest = all.Where(r => !assigned.Contains(r.Id)).ToArray();
+        if (rest.Length > 0) result.Add(("日常玩耍与互动", rest));
+        return result.ToArray();
     }
     void Save() { if (closed) return; Preferences.Left = Position.X; Preferences.Top = Position.Y; Preferences.Save(); }
     void Play(CompanionAnimationRule rule, string nextPhase, bool mirror = false)
@@ -210,9 +271,14 @@ internal sealed partial class LinuxPetWindow : Window
         var area = (Screens.ScreenFromWindow(this) ?? Screens.Primary)?.WorkingArea ?? new PixelRect(0, 0, 1280, 720);
         bubbleWindow.Width = Math.Min(size.Width, area.Width / DesktopScaling - 16); bubbleWindow.Height = Math.Min(size.Height, area.Height / DesktopScaling - 16);
         int width = (int)(bubbleWindow.Width * DesktopScaling), height = (int)(bubbleWindow.Height * DesktopScaling);
-        int x = Position.X + (int)(Width * DesktopScaling / 2) - width / 2, y = Position.Y + (int)(SpriteSize * 58 / 360 * DesktopScaling) - height - 10;
-        if (y < area.Y) y = Position.Y + (int)(SpriteSize * 336 / 360 * DesktopScaling) + 10;
-        bubbleWindow.Position = new(Math.Clamp(x, area.X + 8, Math.Max(area.X + 8, area.Right - width - 8)), Math.Clamp(y, area.Y + 8, Math.Max(area.Y + 8, area.Bottom - height - 8)));
+        int centerX = Position.X + (int)(Width * DesktopScaling / 2);
+        int x = centerX - width / 2, y = Position.Y + (int)(SpriteSize * 58 / 360 * DesktopScaling) - height - 10;
+        bool belowPet = y < area.Y + 8;
+        if (belowPet) y = Position.Y + (int)(SpriteSize * 336 / 360 * DesktopScaling) + 10;
+        int clampedX = Math.Clamp(x, area.X + 8, Math.Max(area.X + 8, area.Right - width - 8));
+        int clampedY = Math.Clamp(y, area.Y + 8, Math.Max(area.Y + 8, area.Bottom - height - 8));
+        bubbleFrame.PointAt((centerX - clampedX) / DesktopScaling, belowPet, scale);
+        bubbleWindow.Position = new(clampedX, clampedY);
     }
     async Task Tick()
     {
@@ -248,8 +314,10 @@ internal sealed partial class LinuxPetWindow : Window
     {
         if (Puppet || generating || closed || phase == "Exit" || modelInstalling) return;
         if (!brain.ModelAvailable) { await InstallModel(); return; }
+        if (hidden) RestorePet();
         if (!Preferences.ModelEnabled) { ShowText("主人，请先在设置里启用本地大模型哦~", false); return; }
         if (!brain.CanRunOnCurrentPower) { ShowText("主人，当前设置为笔记本离电暂停模型，可以在设置里调节哦。", false); return; }
+        if (weather) ShowText("主人，正在查看" + CompanionRegions.FullName(CompanionRegions.District(Preferences.WeatherRegionCode)) + "的天气～", false, true);
         generating = true; long version = ++speechVersion; streamed = false; loading.IsVisible = true;
         try
         {
@@ -260,6 +328,7 @@ internal sealed partial class LinuxPetWindow : Window
             var text = weather ? await brain.GenerateWeather(p => Partial(p, version)) : await brain.Generate(Preferences.PublicInfo, Preferences.ForegroundEnabled, lastForeground, p => Partial(p, version));
             if (version != speechVersion || Puppet || hidden || fullscreenHidden || closed || !Preferences.ModelEnabled || !brain.CanRunOnCurrentPower) return;
             if (text.Length > 0) { if (streamed) { fullText = text; bubbleText.Text = text; ResetDwell(); } else ShowText(text, false, fromModel: true); }
+            else if (weather) ShowText("主人，" + brain.Status + "。", false);
             else if (streamed && !externalSpeech) bubbleWindow.Hide();
         }
         finally { generating = false; loading.IsVisible = false; }
@@ -269,8 +338,24 @@ internal sealed partial class LinuxPetWindow : Window
     {
         var menu = new ContextMenu();
         MenuItem Item(string title, Action action, bool available = true) { var item = new MenuItem { Header = title, IsEnabled = available }; item.Click += (_, _) => action(); return item; }
-        menu.ItemsSource = new[] { Item("设置", OpenSettings), Item("天气", async () => await Speak(true), !Puppet), Item("吐字测试", async () => await Speak(false), !Puppet),
-            Item(hidden ? "显示桌宠" : "隐藏桌宠", () => { if (hidden) { hidden = false; Show(); Clamp(); } else { hidden = true; Hide(); bubbleWindow.Hide(); speechVersion++; brain.CancelGeneration(); } }), Item("关闭桌宠", Close) };
+        var actionMenu = new MenuItem { Header = $"播放动作（{policy.Rules.Count}）" };
+        var actionItems = new List<object> { Item("🎲 随机播放动作", PlayRandomAction), new Separator() };
+        foreach (var group in ActionCategories())
+        {
+            var sub = new MenuItem { Header = $"{group.Category}（{group.Rules.Length}）" };
+            sub.ItemsSource = group.Rules.Select(r => Item(r.Id, () => PlayManualAction(r))).ToArray();
+            actionItems.Add(sub);
+        }
+        actionMenu.ItemsSource = actionItems;
+        menu.ItemsSource = new object[] {
+            actionMenu,
+            Item("设置", OpenSettings),
+            Item("天气", async () => await Speak(true), !Puppet),
+            Item("吐字测试", async () => await Speak(false), !Puppet),
+            Item("回到右下角", SnapToBottomRight),
+            Item(hidden ? "显示桌宠" : "隐藏桌宠", () => { if (hidden) RestorePet(); else { hidden = true; Hide(); bubbleWindow.Hide(); speechVersion++; brain.CancelGeneration(); } }),
+            Item("关闭桌宠", Close)
+        };
         ContextMenu = menu; menu.Open(this);
     }
     void CloseImmediately() { exitReady = true; Close(); }

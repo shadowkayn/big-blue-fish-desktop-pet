@@ -1,5 +1,16 @@
 <Project Sdk="Microsoft.NET.Sdk">
-  <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework><RuntimeIdentifier>linux-x64</RuntimeIdentifier><Nullable>enable</Nullable><ImplicitUsings>enable</ImplicitUsings><AssemblyName>BigBlueFish.Linux</AssemblyName><DefineConstants>$(DefineConstants);COMPANION_OCR;COMPANION_LINUX</DefineConstants></PropertyGroup>
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <RuntimeIdentifiers>linux-x64;osx-arm64;osx-x64</RuntimeIdentifiers>
+    <RuntimeIdentifier Condition="!$([MSBuild]::IsOSPlatform('OSX')) And ('$(RuntimeIdentifier)' == '' Or '$(RuntimeIdentifier)' == 'win-x64')">linux-x64</RuntimeIdentifier>
+    <RuntimeIdentifier Condition="$([MSBuild]::IsOSPlatform('OSX')) And ('$(RuntimeIdentifier)' == '' Or '$(RuntimeIdentifier)' == 'win-x64') And '$([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture)' == 'Arm64'">osx-arm64</RuntimeIdentifier>
+    <RuntimeIdentifier Condition="$([MSBuild]::IsOSPlatform('OSX')) And ('$(RuntimeIdentifier)' == '' Or '$(RuntimeIdentifier)' == 'win-x64') And '$([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture)' != 'Arm64'">osx-x64</RuntimeIdentifier>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>BigBlueFish.Linux</AssemblyName>
+    <DefineConstants>$(DefineConstants);COMPANION_OCR;COMPANION_LINUX</DefineConstants>
+  </PropertyGroup>
   <PropertyGroup Condition="'$(CompanionEdition)' == 'Safe'"><NuGetLockFilePath>packages.safe.lock.json</NuGetLockFilePath></PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Avalonia.Desktop" Version="12.1.4" />

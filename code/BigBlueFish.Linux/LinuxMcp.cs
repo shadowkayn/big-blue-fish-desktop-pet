@@ -125,7 +125,8 @@ internal sealed partial class LinuxPetWindow
             Background = Avalonia.Media.Brushes.Transparent, BorderThickness = new Thickness(0), PlaceholderText = hint };
         Avalonia.Automation.AutomationProperties.SetName(text, hint);
         var editor = new Grid(); editor.Children.Add(text);
-        var status = new TextBlock { Text = "Ctrl+Enter 发送", Foreground = Avalonia.Media.Brushes.SlateGray, FontSize = 11,
+        string shortcutHint = OperatingSystem.IsMacOS() ? "⌘+Enter / Ctrl+Enter 发送" : "Ctrl+Enter 发送";
+        var status = new TextBlock { Text = shortcutHint, Foreground = Avalonia.Media.Brushes.SlateGray, FontSize = 11,
             VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center, TextWrapping = Avalonia.Media.TextWrapping.Wrap, Margin = new Thickness(0, 0, 8, 0) };
         var panel = new StackPanel { Spacing = 4 }; panel.Children.Add(editor);
         var frame = new Border { Background = new Avalonia.Media.SolidColorBrush(Avalonia.Media.Color.FromRgb(255, 251, 244)),
@@ -143,7 +144,7 @@ internal sealed partial class LinuxPetWindow
         text.TextChanged += (_,_) => send.IsEnabled = McpInputAvailable && !string.IsNullOrWhiteSpace(text.Text);
         dialog.AddHandler(InputElement.KeyDownEvent, (_,e) => {
             if (e.Key == Key.Escape) { e.Handled = true; dialog.Close(); }
-            else if(e.Key == Key.Enter && e.KeyModifiers == KeyModifiers.Control) { e.Handled = true; Send(); }
+            else if(e.Key == Key.Enter && (e.KeyModifiers == KeyModifiers.Control || e.KeyModifiers == KeyModifiers.Meta)) { e.Handled = true; Send(); }
         }, Avalonia.Interactivity.RoutingStrategies.Tunnel);
         bool positioning = false;
         void Follow()
